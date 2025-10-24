@@ -29,7 +29,7 @@
         // --- 1. WebSocket 연결 ---
         const statusDiv = document.getElementById('status');
         // 'localhost:12121' 부분은 서버 주소와 포트에 맞게 수정
-        const ws = new WebSocket('ws://host.sysout.co.kr:12121'); 
+        const ws = new WebSocket('wss://host.sysout.co.kr:12121'); 
         
         ws.onopen = () => {
             console.log('시그널링 서버에 연결됨');
