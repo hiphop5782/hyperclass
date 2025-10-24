@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>WebRTC 2단계: 시그널링 서버 연동</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        video { width: 48%; border: 2px solid black; background: #eee; margin: 5px; }
+        button { font-size: 1.2em; margin: 10px 5px; }
+        .status { font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>WebRTC 2단계: 1:1 원격 화면 공유</h1>
+    <div id="status" class="status">서버에 연결 중...</div>
+    <div>
+        <button id="startButton">1. 화면 켜기</button> 
+        <button id="callButton" disabled>2. (강사) 공유 시작하기</button>
+    </div>
+    <div>
+        <h2>내 화면 (Local)</h2>
+        <video id="localVideo" autoplay muted playsinline></video>
+        
+        <h2>상대방 화면 (Remote)</h2>
+        <video id="remoteVideo" autoplay playsinline></video>
+    </div>
+
+    <script>
+        // --- 1. WebSocket 연결 ---
+        const statusDiv = document.getElementById('status');
+        // 'localhost:12121' 부분은 서버 주소와 포트에 맞게 수정
+        const ws = new WebSocket('ws://host.sysout.co.kr:12121'); 
+        
+        ws.onopen = () => {
+            console.log('시그널링 서버에 연결됨');
+            statusDiv.textContent = '✅ 서버 연결 성공. (총 1명)';
+        };
+
+        ws.onmessage = async (message) => {
+            console.log('서버로부터 메시지 수신');
+            const data = JSON.parse(message.data);
+
+            if (data.type === 'offer') {
+                // (학생 측) Offer를 받음
+                statusDiv.textContent = '✅ 화면 공유 요청 받음. (총 2명)';
+                await createAnswer(data.offer);
+            } else if (data.type === 'answer') {
+                // (강사 측) Answer를 받음
+                await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                console.log('원격 Answer 설정 완료');
+            } else if (data.type === 'candidate') {
+                // (양측) ICE Candidate를 받음
+                if (pc) {
+                    await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+                }
+            } else if (data.type === 'info' && data.message === 'client_joined') {
+                 statusDiv.textContent = '✅ 상대방 접속 완료. (총 2명)';
+            }
+        };
+        ws.onclose = () => {
+            statusDiv.textContent = '❌ 서버 연결 끊김';
+        };
+
+        // --- 2. WebRTC 로직 ---
+        let localStream;
+        let pc; // PeerConnection
+
+        // ▼▼▼ [필수 수정] STUN 서버 설정 추가 ▼▼▼
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:1902' },
+                { urls: 'stun:stun1.l.google.com:1902' }
+            ]
+        };
+        // ▲▲▲ [필수 수정] 여기까지 ▲▲▲
+
+        const startButton = document.getElementById('startButton');
+        const callButton = document.getElementById('callButton');
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+
+        startButton.onclick = start;
+        callButton.onclick = createOffer; 
+
+        // WebRTC PeerConnection 초기화 (공통 로직)
+        function createPeerConnection() {
+            // [수정] configuration 객체 전달
+            pc = new RTCPeerConnection(configuration); 
+
+            // ICE Candidate 찾으면 서버로 전송
+            pc.onicecandidate = e => {
+                if (e.candidate) {
+                    console.log('ICE Candidate 생성 -> 서버로 전송');
+                    ws.send(JSON.stringify({ type: 'candidate', candidate: e.candidate }));
+                }
+            };
+            
+            // 상대방 스트림 받으면 remoteVideo에 연결
+            pc.ontrack = e => {
+                console.log('원격 스트림 수신!');
+                if (remoteVideo.srcObject !== e.streams[0]) {
+                    remoteVideo.srcObject = e.streams[0];
+                }
+            };
+
+            // 로컬 스트림을 PeerConnection에 추가
+            if (localStream) {
+                localStream.getTracks().forEach(track => {
+                    pc.addTrack(track, localStream);
+                });
+            }
+        }
+
+        // 1. 화면 켜기 (공통)
+        async function start() {
+            console.log('화면 공유 접근 요청...');
+            try {
+                localStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: true,
+                    audio: false
+                });
+                localVideo.srcObject = localStream;
+                startButton.disabled = true;
+                callButton.disabled = false;
+            } catch (e) {
+                alert(`getDisplayMedia() error: ${e.name}`);
+            }
+        }
+
+        // 2. (강사) Offer 생성 및 전송
+        async function createOffer() {
+            console.log('Offer 생성 시작...');
+            callButton.disabled = true;
+            
+            createPeerConnection(); // PeerConnection 생성
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            
+            console.log('Offer 생성 -> 서버로 전송');
+            ws.send(JSON.stringify({ type: 'offer', offer: offer }));
+        }
+
+        // 3. (학생) Answer 생성 및 전송 (Offer를 받았을 때 호출됨)
+        async function createAnswer(offer) {
+            console.log('Answer 생성 시작...');
+            
+            createPeerConnection(); // PeerConnection 생성
+            
+            await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            console.log('원격 Offer 설정 완료');
+            
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            console.log('Answer 생성 -> 서버로 전송');
+            ws.send(JSON.stringify({ type: 'answer', answer: answer }));
+        }
+
+    </script>
+</body>
+</html>
